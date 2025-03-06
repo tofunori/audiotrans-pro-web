@@ -157,12 +157,25 @@ class AudioTranscriber:
             if beam_size > 1:
                 generate_kwargs["num_beams"] = beam_size
                 
+            # Check audio duration to decide if timestamps are needed
+            # Calculate an approximate duration - 16000 samples = 1 second at 16kHz
+            approx_duration = len(audio_bytes) / 16000  # in seconds
+            
+            # Enable timestamps for longer audio (>25 seconds) to avoid errors
+            force_timestamps = approx_duration > 25
+            actual_timestamps = use_timestamps or force_timestamps
+            
+            if force_timestamps and not use_timestamps:
+                st.info("Note: Timestamps have been automatically enabled for this longer audio file.")
+                
             # Process audio bytes directly instead of using a file path
             # This avoids the need for ffmpeg
             result = self.pipe(
                 {"array": audio_bytes, "sampling_rate": 16000},  # Use 16kHz as default
-                return_timestamps=use_timestamps,
-                generate_kwargs=generate_kwargs
+                return_timestamps=actual_timestamps,
+                generate_kwargs=generate_kwargs,
+                chunk_length_s=30,  # Process in 30-second chunks
+                stride_length_s=5   # With 5-second overlap between chunks
             )
             
             end_time = time.time()
@@ -177,7 +190,7 @@ class AudioTranscriber:
                 "language": language,
                 "duration": audio_duration,
                 "processing_time": processing_time,
-                "has_timestamps": use_timestamps
+                "has_timestamps": actual_timestamps
             }
             
             # Combine result with metadata

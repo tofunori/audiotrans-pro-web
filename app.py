@@ -2,12 +2,13 @@ import streamlit as st
 import torch
 import os
 import time
-import librosa
+import io
+import numpy as np
+import soundfile as sf
 from datetime import datetime
 import uuid
 from docx import Document
 import tempfile
-import io
 import base64
 import re
 
@@ -87,7 +88,7 @@ class AudioTranscriber:
             torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
             
             # Load model and processor - use a smaller model for compatibility
-            model_id = "openai/whisper-small"  # Changed from large-v3 to small
+            model_id = "openai/whisper-small"  # Using small model
             
             # Set up model kwargs based on available optimizations - keep it minimal
             model_kwargs = {
@@ -124,18 +125,18 @@ class AudioTranscriber:
         else:
             return "Device: CPU"
     
-    def get_audio_duration(self, file_path):
-        """Get the duration of an audio file"""
+    def get_audio_duration(self, audio_data, sampling_rate):
+        """Get the duration of audio data"""
         try:
-            # Use librosa to get audio duration
-            duration = librosa.get_duration(path=file_path)
+            # Calculate duration from the audio data and sample rate
+            duration = len(audio_data) / sampling_rate
             return duration
         except Exception as e:
-            st.warning(f"Error getting audio duration: {str(e)}")
+            st.warning(f"Error calculating audio duration: {str(e)}")
             return 0
     
-    def transcribe(self, audio_file, language="en", temperature=0.0, use_timestamps=False, beam_size=1):
-        """Transcribe an audio file"""
+    def transcribe(self, audio_bytes, language="en", temperature=0.0, use_timestamps=False, beam_size=1):
+        """Transcribe audio from bytes"""
         if not self.model_loaded:
             success = self.load_model()
             if not success:
@@ -144,7 +145,7 @@ class AudioTranscriber:
         try:
             start_time = time.time()
             
-            # Perform transcription with simplified arguments
+            # Generate kwargs for the pipeline
             generate_kwargs = {
                 "task": "transcribe",
                 "language": language,
@@ -156,8 +157,10 @@ class AudioTranscriber:
             if beam_size > 1:
                 generate_kwargs["num_beams"] = beam_size
                 
+            # Process audio bytes directly instead of using a file path
+            # This avoids the need for ffmpeg
             result = self.pipe(
-                audio_file,
+                {"array": audio_bytes, "sampling_rate": 16000},  # Use 16kHz as default
                 return_timestamps=use_timestamps,
                 generate_kwargs=generate_kwargs
             )
@@ -165,12 +168,11 @@ class AudioTranscriber:
             end_time = time.time()
             processing_time = end_time - start_time
             
-            # Get audio duration for metadata
-            audio_duration = self.get_audio_duration(audio_file)
+            # Get audio duration
+            audio_duration = self.get_audio_duration(audio_bytes, 16000)
             
             # Compile metadata
             metadata = {
-                "source_file": os.path.basename(audio_file),
                 "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "language": language,
                 "duration": audio_duration,
@@ -199,7 +201,6 @@ class AudioTranscriber:
             
             # Add metadata
             metadata = result["metadata"]
-            output.write(f"Source file: {metadata['source_file']}\n")
             output.write(f"Transcription date: {metadata['date']}\n")
             output.write(f"Language: {metadata['language']}\n")
             output.write(f"Duration: {self.format_duration(metadata['duration'])}\n")
@@ -240,29 +241,25 @@ class AudioTranscriber:
             doc.add_heading('Audio Transcription', 0)
             
             # Add metadata
-            metadata_table = doc.add_table(rows=5, cols=2)
+            metadata_table = doc.add_table(rows=4, cols=2)
             metadata_table.style = 'Table Grid'
             
             # Fill metadata
             metadata = result["metadata"]
             
             cells = metadata_table.rows[0].cells
-            cells[0].text = 'Source file'
-            cells[1].text = metadata['source_file']
-            
-            cells = metadata_table.rows[1].cells
             cells[0].text = 'Transcription date'
             cells[1].text = metadata['date']
             
-            cells = metadata_table.rows[2].cells
+            cells = metadata_table.rows[1].cells
             cells[0].text = 'Language'
             cells[1].text = metadata['language']
             
-            cells = metadata_table.rows[3].cells
+            cells = metadata_table.rows[2].cells
             cells[0].text = 'Duration'
             cells[1].text = self.format_duration(metadata['duration'])
             
-            cells = metadata_table.rows[4].cells
+            cells = metadata_table.rows[3].cells
             cells[0].text = 'Processing time'
             cells[1].text = self.format_duration(metadata['processing_time'])
             
@@ -328,6 +325,39 @@ class AudioTranscriber:
                 mins = int(minutes % 60)
                 return f"{hours} hour{'s' if hours > 1 else ''} {mins} minute{'s' if mins > 1 else ''} {secs} second{'s' if secs > 1 else ''}"
 
+# Load audio file and convert to array
+def load_audio_bytes(uploaded_file):
+    """Load audio bytes from uploaded file and resample to 16kHz"""
+    try:
+        # Read bytes from the uploaded file
+        audio_bytes = uploaded_file.getvalue()
+        
+        # Use soundfile to read the audio data
+        with sf.SoundFile(io.BytesIO(audio_bytes)) as sound_file:
+            # Get the sample rate and number of channels
+            sample_rate = sound_file.samplerate
+            num_channels = sound_file.channels
+            
+            # Read the full file
+            audio_data = sound_file.read(dtype='float32')
+            
+            # Convert to mono if needed
+            if num_channels > 1:
+                audio_data = audio_data.mean(axis=1)
+            
+            # Resample to 16kHz if needed (Whisper expects 16kHz)
+            if sample_rate != 16000:
+                # Simple resampling using numpy (not high quality but works)
+                audio_length = len(audio_data)
+                new_length = int(audio_length * 16000 / sample_rate)
+                indices = np.linspace(0, audio_length - 1, new_length)
+                audio_data = np.interp(indices, np.arange(audio_length), audio_data)
+            
+            return audio_data, 16000
+    except Exception as e:
+        st.error(f"Error loading audio file: {str(e)}")
+        return None, None
+
 # Create download link for file
 def get_download_link(content, filename, display_text):
     """Generate a download link for the given content"""
@@ -351,8 +381,10 @@ def init_session_state():
         st.session_state.transcription_result = None
     if 'processing_time' not in st.session_state:
         st.session_state.processing_time = 0
-    if 'temp_file_path' not in st.session_state:
-        st.session_state.temp_file_path = None
+    if 'audio_data' not in st.session_state:
+        st.session_state.audio_data = None
+    if 'sample_rate' not in st.session_state:
+        st.session_state.sample_rate = None
 
 # Function to handle model loading
 def load_model():
@@ -367,39 +399,35 @@ def load_model():
 # Function to handle file upload
 def process_audio_file(uploaded_file):
     if uploaded_file is not None:
-        # Create a temporary file to save the uploaded audio
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
-            tmp_file.write(uploaded_file.getvalue())
-            st.session_state.temp_file_path = tmp_file.name
+        with st.spinner("Processing audio file..."):
+            # Load audio data
+            audio_data, sample_rate = load_audio_bytes(uploaded_file)
+            
+            if audio_data is not None:
+                # Store in session state
+                st.session_state.audio_data = audio_data
+                st.session_state.sample_rate = sample_rate
+                
+                # Calculate duration
+                duration = len(audio_data) / sample_rate
+                minutes = int(duration // 60)
+                seconds = int(duration % 60)
+                
+                # Show file details
+                st.success(f"File uploaded: {uploaded_file.name}")
+                st.info(f"Duration: {minutes}m {seconds}s")
+                
+                return True
         
-        # Get audio duration
-        duration = st.session_state.transcriber.get_audio_duration(st.session_state.temp_file_path)
-        minutes = int(duration // 60)
-        seconds = int(duration % 60)
-        
-        # Show file details
-        st.success(f"File uploaded: {uploaded_file.name}")
-        st.info(f"Duration: {minutes}m {seconds}s")
-        
-        return True
     return False
 
-# Function to clean up temporary files
-def cleanup_temp_files():
-    if st.session_state.temp_file_path and os.path.exists(st.session_state.temp_file_path):
-        try:
-            os.unlink(st.session_state.temp_file_path)
-            st.session_state.temp_file_path = None
-        except Exception as e:
-            st.warning(f"Could not remove temporary file: {e}")
-
 # Function to start transcription
-def start_transcription(file_path, language, temperature, use_timestamps, beam_size):
+def start_transcription(audio_data, language, temperature, use_timestamps, beam_size):
     if not st.session_state.model_loaded:
         st.warning("Please load the model first.")
         return
     
-    if not file_path or not os.path.exists(file_path):
+    if audio_data is None:
         st.warning("Please upload an audio file first.")
         return
     
@@ -420,7 +448,7 @@ def start_transcription(file_path, language, temperature, use_timestamps, beam_s
     # Perform transcription
     try:
         result, processing_time = st.session_state.transcriber.transcribe(
-            file_path,
+            audio_data,
             language=language,
             temperature=temperature,
             use_timestamps=use_timestamps,
@@ -621,20 +649,21 @@ def main():
     
     # Process the uploaded file
     if uploaded_file is not None:
-        if st.session_state.temp_file_path is None or uploaded_file.name not in st.session_state.temp_file_path:
+        # Check if we need to process a new file
+        if st.session_state.audio_data is None or uploaded_file.name != getattr(st.session_state, 'last_uploaded_filename', None):
+            st.session_state.last_uploaded_filename = uploaded_file.name
             process_audio_file(uploaded_file)
     
     # Transcribe button
-    if st.button("🎬 Start Transcription", type="primary", disabled=not st.session_state.model_loaded or uploaded_file is None):
-        if st.session_state.temp_file_path:
-            with st.spinner("Transcribing audio..."):
-                result = start_transcription(
-                    st.session_state.temp_file_path,
-                    selected_language,
-                    temperature,
-                    use_timestamps,
-                    beam_size
-                )
+    if st.button("🎬 Start Transcription", type="primary", disabled=not st.session_state.model_loaded or st.session_state.audio_data is None):
+        with st.spinner("Transcribing audio..."):
+            result = start_transcription(
+                st.session_state.audio_data,
+                selected_language,
+                temperature,
+                use_timestamps,
+                beam_size
+            )
     
     # Display transcription result if available
     if st.session_state.transcription_result:

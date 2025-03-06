@@ -1,6 +1,5 @@
 import streamlit as st
 import torch
-import os
 import time
 import io
 import numpy as np
@@ -8,19 +7,9 @@ import soundfile as sf
 from datetime import datetime
 import uuid
 from docx import Document
-import tempfile
 import base64
-import re
 
-# Try to import accelerate - it's optional but will improve performance
-try:
-    import accelerate
-    HAS_ACCELERATE = True
-except ImportError:
-    HAS_ACCELERATE = False
-
-# Now import the transformers components
-from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
+from transformers import pipeline
 
 # App configuration
 st.set_page_config(
@@ -69,47 +58,20 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# Transcriber class
+# Transcriber class - simplified
 class AudioTranscriber:
     def __init__(self):
-        self.model = None
-        self.processor = None
         self.pipe = None
         self.model_loaded = False
         
     def load_model(self):
-        """Load the Whisper model and processor"""
+        """Load the Whisper model using simplified approach"""
         if self.model_loaded:
             return True
             
         try:
-            # Configure device
-            device = "cuda:0" if torch.cuda.is_available() else "cpu"
-            torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-            
-            # Load model and processor - use a smaller model for compatibility
-            model_id = "openai/whisper-small"  # Using small model
-            
-            # Set up model kwargs based on available optimizations - keep it minimal
-            model_kwargs = {
-                "torch_dtype": torch_dtype
-            }
-            
-            # Load the model with simplified arguments
-            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, **model_kwargs)
-            
-            self.model.to(device)
-            self.processor = AutoProcessor.from_pretrained(model_id)
-            
-            # Create the pipeline with simplified arguments
-            self.pipe = pipeline(
-                "automatic-speech-recognition",
-                model=self.model,
-                tokenizer=self.processor.tokenizer,
-                feature_extractor=self.processor.feature_extractor,
-                device=device
-            )
-            
+            # Use the simplest constructor for the pipeline
+            self.pipe = pipeline("automatic-speech-recognition", model="openai/whisper-tiny")
             self.model_loaded = True
             return True
             
@@ -135,7 +97,7 @@ class AudioTranscriber:
             st.warning(f"Error calculating audio duration: {str(e)}")
             return 0
     
-    def transcribe(self, audio_bytes, language="en", temperature=0.0, use_timestamps=False, beam_size=1):
+    def transcribe(self, audio_bytes, language="en", temperature=0.0, use_timestamps=False):
         """Transcribe audio from bytes"""
         if not self.model_loaded:
             success = self.load_model()
@@ -145,37 +107,11 @@ class AudioTranscriber:
         try:
             start_time = time.time()
             
-            # Generate kwargs for the pipeline
-            generate_kwargs = {
-                "task": "transcribe",
-                "language": language,
-            }
-            
-            # Only add optional parameters if they're not default values
-            if temperature > 0:
-                generate_kwargs["temperature"] = temperature
-            if beam_size > 1:
-                generate_kwargs["num_beams"] = beam_size
-                
-            # Check audio duration to decide if timestamps are needed
-            # Calculate an approximate duration - 16000 samples = 1 second at 16kHz
-            approx_duration = len(audio_bytes) / 16000  # in seconds
-            
-            # Enable timestamps for longer audio (>25 seconds) to avoid errors
-            force_timestamps = approx_duration > 25
-            actual_timestamps = use_timestamps or force_timestamps
-            
-            if force_timestamps and not use_timestamps:
-                st.info("Note: Timestamps have been automatically enabled for this longer audio file.")
-                
-            # Process audio bytes directly instead of using a file path
-            # This avoids the need for ffmpeg
+            # Keep transcription simple with minimal parameters
             result = self.pipe(
-                {"array": audio_bytes, "sampling_rate": 16000},  # Use 16kHz as default
-                return_timestamps=actual_timestamps,
-                generate_kwargs=generate_kwargs,
-                chunk_length_s=30,  # Process in 30-second chunks
-                stride_length_s=5   # With 5-second overlap between chunks
+                {"array": audio_bytes, "sampling_rate": 16000},
+                return_timestamps=True,  # Always use timestamps for better compatibility
+                language=language
             )
             
             end_time = time.time()
@@ -190,7 +126,7 @@ class AudioTranscriber:
                 "language": language,
                 "duration": audio_duration,
                 "processing_time": processing_time,
-                "has_timestamps": actual_timestamps
+                "has_timestamps": True  # Always true with our simplified approach
             }
             
             # Combine result with metadata
@@ -216,28 +152,31 @@ class AudioTranscriber:
             metadata = result["metadata"]
             output.write(f"Transcription date: {metadata['date']}\n")
             output.write(f"Language: {metadata['language']}\n")
-            output.write(f"Duration: {self.format_duration(metadata['duration'])}\n")
+            if metadata.get('duration'):
+                output.write(f"Duration: {self.format_duration(metadata['duration'])}\n")
             output.write(f"Processing time: {self.format_duration(metadata['processing_time'])}\n\n")
             output.write("=" * 50 + "\n\n")
             
             # Add transcription
             transcription = result["transcription"]
-            has_timestamps = metadata.get("has_timestamps", False)
             
-            if has_timestamps and isinstance(transcription, dict) and "chunks" in transcription:
-                output.write("TRANSCRIPTION WITH TIMESTAMPS:\n\n")
-                for chunk in transcription["chunks"]:
-                    start = chunk.get("timestamp", [0])[0]
-                    minutes = int(start // 60)
-                    seconds = int(start % 60)
-                    time_str = f"[{minutes:02d}:{seconds:02d}] "
-                    chunk_text = chunk.get("text", "")
-                    output.write(time_str + chunk_text + "\n")
-            else:
-                if isinstance(transcription, dict) and "text" in transcription:
+            # Depending on the format returned, display appropriately
+            if isinstance(transcription, dict):
+                if "chunks" in transcription:
+                    output.write("TRANSCRIPTION WITH TIMESTAMPS:\n\n")
+                    for chunk in transcription["chunks"]:
+                        start = chunk.get("timestamp", [0])[0]
+                        minutes = int(start // 60)
+                        seconds = int(start % 60)
+                        time_str = f"[{minutes:02d}:{seconds:02d}] "
+                        chunk_text = chunk.get("text", "")
+                        output.write(time_str + chunk_text + "\n")
+                elif "text" in transcription:
                     output.write(transcription["text"])
                 else:
                     output.write(str(transcription))
+            else:
+                output.write(str(transcription))
             
             return output.getvalue()
         except Exception as e:
@@ -268,9 +207,10 @@ class AudioTranscriber:
             cells[0].text = 'Language'
             cells[1].text = metadata['language']
             
-            cells = metadata_table.rows[2].cells
-            cells[0].text = 'Duration'
-            cells[1].text = self.format_duration(metadata['duration'])
+            if metadata.get('duration'):
+                cells = metadata_table.rows[2].cells
+                cells[0].text = 'Duration'
+                cells[1].text = self.format_duration(metadata['duration'])
             
             cells = metadata_table.rows[3].cells
             cells[0].text = 'Processing time'
@@ -280,39 +220,41 @@ class AudioTranscriber:
             
             # Add transcription
             transcription = result["transcription"]
-            has_timestamps = metadata.get("has_timestamps", False)
             
-            if has_timestamps and isinstance(transcription, dict) and "chunks" in transcription:
-                doc.add_heading('Transcription with timestamps', level=1)
-                
-                # Create table for timestamps
-                timestamps_table = doc.add_table(rows=1, cols=2)
-                timestamps_table.style = 'Table Grid'
-                
-                # Table headers
-                header_cells = timestamps_table.rows[0].cells
-                header_cells[0].text = 'Time'
-                header_cells[1].text = 'Text'
-                
-                # Add chunks with timestamps
-                for chunk in transcription["chunks"]:
-                    start = chunk.get("timestamp", [0])[0]
-                    minutes = int(start // 60)
-                    seconds = int(start % 60)
-                    time_str = f"{minutes:02d}:{seconds:02d}"
-                    chunk_text = chunk.get("text", "")
+            # Depending on the format returned, display appropriately
+            if isinstance(transcription, dict):
+                if "chunks" in transcription:
+                    doc.add_heading('Transcription with timestamps', level=1)
                     
-                    row_cells = timestamps_table.add_row().cells
-                    row_cells[0].text = time_str
-                    row_cells[1].text = chunk_text
-            else:
-                # Add normal transcription
-                doc.add_heading('Transcription', level=1)
-                
-                if isinstance(transcription, dict) and "text" in transcription:
+                    # Create table for timestamps
+                    timestamps_table = doc.add_table(rows=1, cols=2)
+                    timestamps_table.style = 'Table Grid'
+                    
+                    # Table headers
+                    header_cells = timestamps_table.rows[0].cells
+                    header_cells[0].text = 'Time'
+                    header_cells[1].text = 'Text'
+                    
+                    # Add chunks with timestamps
+                    for chunk in transcription["chunks"]:
+                        start = chunk.get("timestamp", [0])[0]
+                        minutes = int(start // 60)
+                        seconds = int(start % 60)
+                        time_str = f"{minutes:02d}:{seconds:02d}"
+                        chunk_text = chunk.get("text", "")
+                        
+                        row_cells = timestamps_table.add_row().cells
+                        row_cells[0].text = time_str
+                        row_cells[1].text = chunk_text
+                elif "text" in transcription:
+                    doc.add_heading('Transcription', level=1)
                     doc.add_paragraph(transcription["text"])
                 else:
+                    doc.add_heading('Transcription', level=1)
                     doc.add_paragraph(str(transcription))
+            else:
+                doc.add_heading('Transcription', level=1)
+                doc.add_paragraph(str(transcription))
             
             # Save the document to a bytes buffer
             docx_bytes = io.BytesIO()
@@ -338,7 +280,7 @@ class AudioTranscriber:
                 mins = int(minutes % 60)
                 return f"{hours} hour{'s' if hours > 1 else ''} {mins} minute{'s' if mins > 1 else ''} {secs} second{'s' if secs > 1 else ''}"
 
-# Load audio file and convert to array
+# Load audio file and convert to array - simplified
 def load_audio_bytes(uploaded_file):
     """Load audio bytes from uploaded file and resample to 16kHz"""
     try:
@@ -360,7 +302,7 @@ def load_audio_bytes(uploaded_file):
             
             # Resample to 16kHz if needed (Whisper expects 16kHz)
             if sample_rate != 16000:
-                # Simple resampling using numpy (not high quality but works)
+                # Simple resampling using numpy
                 audio_length = len(audio_data)
                 new_length = int(audio_length * 16000 / sample_rate)
                 indices = np.linspace(0, audio_length - 1, new_length)
@@ -384,7 +326,7 @@ def get_download_link(content, filename, display_text):
     href = f'<a href="data:{mime_type};base64,{b64}" download="{filename}" class="download-button">{display_text}</a>'
     return href
 
-# Initialize session state
+# Initialize session state - simplified
 def init_session_state():
     if 'transcriber' not in st.session_state:
         st.session_state.transcriber = AudioTranscriber()
@@ -401,7 +343,7 @@ def init_session_state():
 
 # Function to handle model loading
 def load_model():
-    with st.spinner('Loading Whisper model... This may take a minute or two.'):
+    with st.spinner('Loading Whisper model... This may take a minute.'):
         success = st.session_state.transcriber.load_model()
         if success:
             st.session_state.model_loaded = True
@@ -435,7 +377,7 @@ def process_audio_file(uploaded_file):
     return False
 
 # Function to start transcription
-def start_transcription(audio_data, language, temperature, use_timestamps, beam_size):
+def start_transcription(audio_data, language):
     if not st.session_state.model_loaded:
         st.warning("Please load the model first.")
         return
@@ -462,10 +404,7 @@ def start_transcription(audio_data, language, temperature, use_timestamps, beam_
     try:
         result, processing_time = st.session_state.transcriber.transcribe(
             audio_data,
-            language=language,
-            temperature=temperature,
-            use_timestamps=use_timestamps,
-            beam_size=beam_size
+            language=language
         )
         
         st.session_state.processing_time = processing_time
@@ -499,7 +438,6 @@ def display_transcription_result(result):
     # Get the transcription data
     transcription = result["transcription"]
     metadata = result["metadata"]
-    has_timestamps = metadata.get("has_timestamps", False)
     
     # Display processing time
     if st.session_state.processing_time > 0:
@@ -515,22 +453,27 @@ def display_transcription_result(result):
     # Display the result
     st.markdown('<div class="transcription-result">', unsafe_allow_html=True)
     
-    if has_timestamps and isinstance(transcription, dict) and "chunks" in transcription:
-        # Display with timestamps
-        for chunk in transcription["chunks"]:
-            start = chunk.get("timestamp", [0])[0]
-            minutes = int(start // 60)
-            seconds = int(start % 60)
-            time_str = f"[{minutes:02d}:{seconds:02d}]"
-            chunk_text = chunk.get("text", "")
-            
-            st.markdown(f'<span class="timestamp">{time_str}</span> {chunk_text}', unsafe_allow_html=True)
-    else:
-        # Display normal text
-        if isinstance(transcription, dict) and "text" in transcription:
+    # Handle different result formats
+    if isinstance(transcription, dict):
+        if "chunks" in transcription:
+            # Display with timestamps
+            for chunk in transcription["chunks"]:
+                start = chunk.get("timestamp", [0])[0]
+                minutes = int(start // 60)
+                seconds = int(start % 60)
+                time_str = f"[{minutes:02d}:{seconds:02d}]"
+                chunk_text = chunk.get("text", "")
+                
+                st.markdown(f'<span class="timestamp">{time_str}</span> {chunk_text}', unsafe_allow_html=True)
+        elif "text" in transcription:
+            # Display plain text
             st.write(transcription["text"])
         else:
+            # Fallback
             st.write(str(transcription))
+    else:
+        # Another fallback
+        st.write(str(transcription))
     
     st.markdown('</div>', unsafe_allow_html=True)
     
@@ -559,7 +502,7 @@ def display_transcription_result(result):
                 unsafe_allow_html=True
             )
 
-# Main application
+# Main application - simplified
 def main():
     # Initialize session state
     init_session_state()
@@ -580,7 +523,7 @@ def main():
     else:
         st.sidebar.success("✅ Model is loaded and ready to use!")
     
-    # Sidebar - Settings
+    # Sidebar - Settings (simplified)
     st.sidebar.header("Settings")
     
     # Language selection
@@ -598,58 +541,12 @@ def main():
     )
     selected_language = language_options[selected_language_name]
     
-    # Output format selection (not used directly but kept for UI consistency)
+    # Output format selection
     output_format = st.sidebar.selectbox(
         "Output Format",
         options=["Text (.txt)", "Word Document (.docx)"],
         index=0
     )
-    
-    # Precision slider
-    temperature = st.sidebar.slider(
-        "Precision Level",
-        min_value=0.0,
-        max_value=1.0,
-        value=0.0,
-        step=0.05,
-        help="Lower values provide more precise transcription, higher values allow more creativity."
-    )
-    
-    # Display precision label
-    precision_label = "Very High"
-    if temperature <= 0.2:
-        precision_label = "Very High"
-    elif temperature <= 0.4:
-        precision_label = "High"
-    elif temperature <= 0.6:
-        precision_label = "Medium"
-    elif temperature <= 0.8:
-        precision_label = "Low"
-    else:
-        precision_label = "Creative"
-    
-    st.sidebar.caption(f"Precision: {precision_label}")
-    
-    # Timestamps checkbox
-    use_timestamps = st.sidebar.checkbox(
-        "Include timestamps",
-        value=False,
-        help="Add timestamps to the transcription output"
-    )
-    
-    # Transcription quality
-    quality_options = {
-        "Fast": 1,
-        "Standard": 2,
-        "High": 3
-    }
-    selected_quality = st.sidebar.radio(
-        "Transcription Quality",
-        options=list(quality_options.keys()),
-        index=0,
-        help="Higher quality takes longer but may be more accurate"
-    )
-    beam_size = quality_options[selected_quality]
     
     # Main content - File upload
     st.header("Upload Audio File")
@@ -672,10 +569,7 @@ def main():
         with st.spinner("Transcribing audio..."):
             result = start_transcription(
                 st.session_state.audio_data,
-                selected_language,
-                temperature,
-                use_timestamps,
-                beam_size
+                selected_language
             )
     
     # Display transcription result if available
@@ -690,10 +584,7 @@ def main():
         To get started:
         1. **Load the model** using the button in the sidebar
         2. **Upload an audio file** using the file uploader above
-        3. **Choose settings** in the sidebar:
-           - Select language
-           - Adjust precision slider
-           - Choose quality options
+        3. **Choose language** in the sidebar
         4. **Start transcription** by clicking the button
         """)
         st.markdown("</div>", unsafe_allow_html=True)

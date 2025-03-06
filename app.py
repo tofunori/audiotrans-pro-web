@@ -97,7 +97,7 @@ class AudioTranscriber:
             st.warning(f"Error calculating audio duration: {str(e)}")
             return 0
     
-    def transcribe(self, audio_bytes, language="en", temperature=0.0, use_timestamps=False):
+    def transcribe(self, audio_bytes, language="en"):
         """Transcribe audio from bytes"""
         if not self.model_loaded:
             success = self.load_model()
@@ -108,10 +108,11 @@ class AudioTranscriber:
             start_time = time.time()
             
             # Keep transcription simple with minimal parameters
+            # Pass language in generate_kwargs instead of directly
             result = self.pipe(
                 {"array": audio_bytes, "sampling_rate": 16000},
                 return_timestamps=True,  # Always use timestamps for better compatibility
-                language=language
+                generate_kwargs={"language": language}  # Put language here instead
             )
             
             end_time = time.time()

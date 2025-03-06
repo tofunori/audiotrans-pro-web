@@ -86,40 +86,26 @@ class AudioTranscriber:
             device = "cuda:0" if torch.cuda.is_available() else "cpu"
             torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
             
-            # Load model and processor
-            model_id = "openai/whisper-large-v3"
+            # Load model and processor - use a smaller model for compatibility
+            model_id = "openai/whisper-small"  # Changed from large-v3 to small
             
-            # Set up model kwargs based on available optimizations
+            # Set up model kwargs based on available optimizations - keep it minimal
             model_kwargs = {
-                "torch_dtype": torch_dtype,
-                # Remove the attn_implementation parameter as it's causing issues
+                "torch_dtype": torch_dtype
             }
             
-            # Add options that require Accelerate if available
-            if HAS_ACCELERATE:
-                model_kwargs.update({
-                    "low_cpu_mem_usage": True,
-                    "use_safetensors": True
-                })
-            
-            # Load the model
-            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(
-                model_id,
-                **model_kwargs
-            )
+            # Load the model with simplified arguments
+            self.model = AutoModelForSpeechSeq2Seq.from_pretrained(model_id, **model_kwargs)
             
             self.model.to(device)
             self.processor = AutoProcessor.from_pretrained(model_id)
             
-            # Create the pipeline
+            # Create the pipeline with simplified arguments
             self.pipe = pipeline(
                 "automatic-speech-recognition",
                 model=self.model,
                 tokenizer=self.processor.tokenizer,
                 feature_extractor=self.processor.feature_extractor,
-                chunk_length_s=30,
-                stride_length_s=5,
-                torch_dtype=torch_dtype,
                 device=device
             )
             
@@ -158,17 +144,22 @@ class AudioTranscriber:
         try:
             start_time = time.time()
             
-            # Perform transcription
+            # Perform transcription with simplified arguments
+            generate_kwargs = {
+                "task": "transcribe",
+                "language": language,
+            }
+            
+            # Only add optional parameters if they're not default values
+            if temperature > 0:
+                generate_kwargs["temperature"] = temperature
+            if beam_size > 1:
+                generate_kwargs["num_beams"] = beam_size
+                
             result = self.pipe(
                 audio_file,
-                batch_size=4,
                 return_timestamps=use_timestamps,
-                generate_kwargs={
-                    "task": "transcribe",
-                    "language": language,
-                    "temperature": temperature,
-                    "num_beams": beam_size
-                }
+                generate_kwargs=generate_kwargs
             )
             
             end_time = time.time()

@@ -1,0 +1,9 @@
+streamlit==1.22.0
+transformers==4.35.0
+torch==2.0.1
+librosa==0.10.1
+python-docx==0.8.11
+accelerate==0.26.0
+tqdm==4.66.1
+numpy==1.24.3
+watchdog==3.0.0

@@ -92,7 +92,7 @@ class AudioTranscriber:
             # Set up model kwargs based on available optimizations
             model_kwargs = {
                 "torch_dtype": torch_dtype,
-                "attn_implementation": "eager"
+                # Remove the attn_implementation parameter as it's causing issues
             }
             
             # Add options that require Accelerate if available

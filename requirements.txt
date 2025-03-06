@@ -1,5 +1,5 @@
 streamlit==1.22.0
-transformers==4.35.0
+transformers>=4.35.0
 torch>=2.2.0
 librosa==0.10.1
 python-docx==0.8.11
